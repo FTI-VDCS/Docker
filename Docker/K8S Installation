@@ -1,0 +1,279 @@
+sudo mkdir -m 0755 -p /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+echo \
+  "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  "$(. /etc/os-release && echo "$VERSION_CODENAME")" stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+sudo apt-get update
+
+sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+
+VER=$(curl -s https://api.github.com/repos/Mirantis/cri-dockerd/releases/latest|grep tag_name | cut -d '"' -f 4|sed 's/v//g')
+
+wget https://github.com/Mirantis/cri-dockerd/releases/download/v${VER}/cri-dockerd-${VER}.amd64.tgz
+
+tar xvf cri-dockerd-${VER}.amd64.tgz
+
+mv cri-dockerd/cri-dockerd /usr/local/bin/
+
+wget https://raw.githubusercontent.com/Mirantis/cri-dockerd/master/packaging/systemd/cri-docker.service
+
+wget https://raw.githubusercontent.com/Mirantis/cri-dockerd/master/packaging/systemd/cri-docker.socket
+
+mv cri-docker.socket cri-docker.service /etc/systemd/system/
+
+sed -i -e 's,/usr/bin/cri-dockerd,/usr/local/bin/cri-dockerd,' /etc/systemd/system/cri-docker.service
+
+systemctl daemon-reload
+
+systemctl enable cri-docker.service
+
+systemctl enable --now cri-docker.socket
+
+ systemctl status cri-docker.socket
+
+apt -y install curl apt-transport-https
+
+curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
+
+echo "deb https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+
+apt update
+
+apt -y install vim git curl wget kubelet kubeadm kubectl
+
+apt-mark hold kubelet kubeadm kubectl
+
+Turn off swap.
+sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+
+vim /etc/fstab
+#/swap.img	none	swap	sw	0	0
+
+swapoff -a
+mount -a
+free -h
+
+Enable kernel modules and configure sysctl.
+
+sudo modprobe overlay
+sudo modprobe br_netfilter
+
+
+# Add some settings to sysctl
+sudo tee /etc/sysctl.d/kubernetes.conf<<EOF
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.ipv4.ip_forward = 1
+EOF
+
+# Reload sysctl
+sudo sysctl --system
+
+Install Container runtime
+To run containers in Pods, Kubernetes uses a container runtime. Supported container runtimes are:
+* Docker
+* CRI-O
+* Containerd
+
+
+Installing Docker CE runtime:
+
+# Add repo and Install packages
+sudo apt update
+sudo apt install -y curl gnupg2 software-properties-common apt-transport-https ca-certificates
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+sudo apt update
+sudo apt install -y containerd.io docker-ce docker-ce-cli
+
+# Create required directories
+sudo mkdir -p /etc/systemd/system/docker.service.d
+
+# Create daemon json config file
+sudo tee /etc/docker/daemon.json <<EOF
+{
+  "exec-opts": ["native.cgroupdriver=systemd"],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "100m"
+  },
+  "storage-driver": "overlay2"
+}
+EOF
+
+# Start and enable Services
+sudo systemctl daemon-reload 
+sudo systemctl restart docker
+sudo systemctl enable docker
+
+
+Installing CRI-O:
+
+# Ensure you load modules
+sudo modprobe overlay
+sudo modprobe br_netfilter
+
+# Set up required sysctl params
+sudo tee /etc/sysctl.d/kubernetes.conf<<EOF
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.ipv4.ip_forward = 1
+EOF
+
+# Reload sysctl
+sudo sysctl --system
+
+# Add Cri-o repo
+sudo su -
+OS="xUbuntu_20.04"
+VERSION=1.26
+echo "deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/$OS/ /" > /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list
+echo "deb http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/$VERSION/$OS/ /" > /etc/apt/sources.list.d/devel:kubic:libcontainers:stable:cri-o:$VERSION.list
+curl -L https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable:cri-o:$VERSION/$OS/Release.key | apt-key add -
+curl -L https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/$OS/Release.key | apt-key add -
+
+# Install CRI-O
+sudo apt update
+sudo apt install cri-o cri-o-runc
+
+# Update CRI-O CIDR subnet
+sudo sed -i 's/10.85.0.0/192.168.0.0/g' /etc/cni/net.d/100-crio-bridge.conf
+sudo sed -i 's/10.85.0.0/192.168.0.0/g' /etc/cni/net.d/100-crio-bridge.conflist
+
+# Start and enable Service
+sudo systemctl daemon-reload
+sudo systemctl restart crio
+sudo systemctl enable crio
+sudo systemctl status crio
+
+
+Installing Containerd:
+
+# Configure persistent loading of modules
+sudo tee /etc/modules-load.d/containerd.conf <<EOF
+overlay
+br_netfilter
+EOF
+
+# Load at runtime
+sudo modprobe overlay
+sudo modprobe br_netfilter
+
+# Ensure sysctl params are set
+sudo tee /etc/sysctl.d/kubernetes.conf<<EOF
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.ipv4.ip_forward = 1
+EOF
+
+# Reload configs
+sudo sysctl --system
+
+# Install required packages
+sudo apt install -y curl gnupg2 software-properties-common apt-transport-https ca-certificates
+
+# Add Docker repo
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+
+# Install containerd
+sudo apt update
+sudo apt install -y containerd.io
+
+# Configure containerd and start service
+sudo su -
+mkdir -p /etc/containerd
+containerd config default>/etc/containerd/config.toml
+
+# restart containerd
+sudo systemctl restart containerd
+sudo systemctl enable containerd
+systemctl status  containerd
+
+To use the systemd cgroup driver, set plugins.cri.systemd_cgroup = true in /etc/containerd/config.toml. When using kubeadm, manually configure the cgroup driver for kubelet
+
+Step 5: Initialize master node
+Login to the server to be used as master and make sure that the br_netfilter module is loaded:
+$ lsmod | grep br_netfilter
+br_netfilter           22256  0 
+bridge      
+
+systemctl enable kubelet
+
+Pull container images:
+$ sudo kubeadm config images pull
+
+
+If you have multiple CRI sockets, please use --cri-socket to select one:
+
+# CRI-O
+sudo kubeadm config images pull --cri-socket unix:///var/run/crio/crio.sock
+
+# Containerd
+sudo kubeadm config images pull --cri-socket unix:///run/containerd/containerd.sock
+
+# Docker
+sudo kubeadm config images pull --cri-socket unix:///run/cri-dockerd.sock 
+
+
+mkdir -p $HOME/.kube
+sudo cp -f /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+
+kubectl cluster-info
+
+Additional Master nodes can be added using the command in installation output:
+kubeadm join k8s-cluster.computingforgeeks.com:6443 --token sr4l2l.2kvot0pfalh5o4ik \
+    --discovery-token-ca-cert-hash sha256:c692fb047e15883b575bd6710779dc2c5af8073f7cab460abd181fd3ddb29a18 \
+    --control-plane
+
+Install network plugin on Master
+
+kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.25.1/manifests/tigera-operator.yaml 
+kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.25.1/manifests/custom-resources.yaml
+
+
+watch kubectl get pods --all-namespaces
+
+
+For Single node cluster allow Pods to run on master nodes:
+
+kubectl taint nodes --all node-role.kubernetes.io/master-
+kubectl taint nodes --all  node-role.kubernetes.io/control-plane-
+
+Confirm master node is ready:
+
+# CRI-O
+$ kubectl get nodes -o wide
+NAME     STATUS   ROLES                  AGE   VERSION   INTERNAL-IP      EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION     CONTAINER-RUNTIME
+ubuntu   Ready    control-plane,master   38s   v1.26.1   143.198.114.46   <none>        Ubuntu 20.04.3 LTS   5.4.0-88-generic   cri-o://1.23.2
+
+# Containerd
+$ kubectl get nodes -o wide
+NAME     STATUS   ROLES                  AGE   VERSION   INTERNAL-IP      EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION     CONTAINER-RUNTIME
+ubuntu   Ready    control-plane,master   15m   v1.26.1   143.198.114.46   <none>        Ubuntu 20.04.3 LTS   5.4.0-88-generic   containerd://1.4.11
+
+# Docker
+$ kubectl get nodes -o wide
+NAME           STATUS   ROLES    AGE   VERSION   INTERNAL-IP      EXTERNAL-IP   OS-IMAGE           KERNEL-VERSION     CONTAINER-RUNTIME
+k8s-master01   Ready    master   64m   v1.26.1   135.181.28.113   <none>        Ubuntu 20.04 LTS   5.4.0-37-generic   docker://20.10.8
+
+Step 7: Add worker nodes
+ kubeadm join k8s-cluster.computingforgeeks.com:6443 --token sr4l2l.2kvot0pfalh5o4ik \
+    --discovery-token-ca-cert-hash sha256:c692fb047e15883b575bd6710779dc2c5af8073f7cab460abd181fd3ddb29a18 \
+    --control-plane 
+
+We need to validate that our cluster is working by deploying an application.
+kubectl apply -f https://k8s.io/examples/pods/commands.yaml
+
+Check to see if pod started
+$ kubectl get pods
+NAME           READY   STATUS      RESTARTS   AGE
+command-demo   0/1     Completed   0          16s
+
+Step 9: Install Kubernetes Dashboard (Optional)
