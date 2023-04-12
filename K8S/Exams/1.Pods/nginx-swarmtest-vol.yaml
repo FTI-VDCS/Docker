@@ -5,6 +5,8 @@ metadata:
   labels:
     app: myapp
 spec:
+  nodeSelector:
+    kubernetes.io/hostname: k8s-worker02    
   volumes:
     # Định nghĩa một volume - ánh xạ thư mục /home/www máy host
     - name: "myvol"
